@@ -1,5 +1,5 @@
 import { LineString, Point } from "geojson";
-import { Country, DataModelName, KeyboardShortcut, Node, SdkFeature, Segment, WmeSDK, ZoomLevel } from "wme-sdk-typings";
+import { Country, DataModelName, KeyboardShortcut, Node, SdkFeature, Segment, Street, WmeSDK, ZoomLevel } from "wme-sdk-typings";
 import { simplify } from '@turf/simplify';
 import { lineOffset } from "@turf/line-offset";
 import proj4 from "proj4";
@@ -589,23 +589,6 @@ function initScript() {
     },
   };
 
-  /**
-   *
-   * @param {number} roadType
-   * @param {boolean} twoWay
-   * @returns {number}
-   */
-  function getWidth(roadType: number, twoWay: boolean): number {
-    // If in close zoom and user enabled the realsize mode
-    if (preferences['realsize']) {
-      return twoWay
-        ? defaultSegmentWidthMeters[roadType]
-        : defaultLaneWidthMeters[roadType];
-    }
-    // Use the value stored in the preferences
-    return streetStyles[roadType].strokeWidth;
-  }
-
   function loadPreferences(overwrite = false) {
     let oldUser = true;
     let loadedPreferences = null;
@@ -1037,21 +1020,6 @@ function initScript() {
     return Math.atan2(dx, dy);
   }
 
-  function getAngle(isForward: boolean, p0: OpenLayers.Geometry.Point, p1: OpenLayers.Geometry.Point) {
-    let dx = 0;
-    let dy = 0;
-
-    if (isForward) {
-      dx = p1.x - p0.x;
-      dy = p1.y - p0.y;
-    } else {
-      dx = p0.x - p1.x;
-      dy = p0.y - p1.y;
-    }
-    const angle = Math.atan2(dx, dy);
-    return (angle * 180) / Math.PI; // 360-(...) -90 removed from here
-  }
-
   function getSuperScript(number: number): string {
     let res = '';
     if (number) {
@@ -1066,16 +1034,6 @@ function initScript() {
       }
     }
     return res;
-  }
-
-  /**
-   * 
-   * @param {Waze.Feature.Vector.Segment} segment
-   * @returns 
-   */
-  function hasNonEmptyStreet(segment: Waze.Feature.Vector.Segment) {
-    const e = segment.getAddress(W.model);
-    return null != e.getStreet() && !e.isEmptyStreet()
   }
 
   /**
@@ -1098,11 +1056,11 @@ function initScript() {
     const labels = [];
     labelFeature = null;
     const attributes = segmentModel.getAttributes();
-    const address = segmentModel.getAddress(W.model);
-    const hasStreetName = hasNonEmptyStreet(segmentModel);
+    const address = wmeSDK.DataModel.Segments.getAddress({ segmentId: attributes.id })
+    const hasStreetName = !address.isEmpty && typeof (address.street?.name) == 'string';
     let streetPart = '';
     if (hasStreetName) {
-      streetPart = address.getStreetName();
+      streetPart = address.street?.name as string;
     } else if (attributes.roadType < 10 && !segmentModel.isInRoundabout()) {
       streetPart = '⚑';
     }
@@ -1112,15 +1070,14 @@ function initScript() {
     let altStreetPart = '';
     if (preferences['showANs']) {
       let ANsShown = 0;
-      for (let i = 0; i < attributes.streetIDs.length; i += 1) {
-        const streetID = attributes.streetIDs[i];
+      for (let i = 0; i < address.altStreets.length; i += 1) {
+        const altStreet = address.altStreets[i];
         if (ANsShown === 2) {
           // Show maximum 2 alternative names
           altStreetPart += ' …';
           break;
         }
-        const altStreet = W.model.streets.getObjectById(streetID);
-        const altStreetName = altStreet?.name ?? altStreet?.getName()
+        const altStreetName = altStreet.street?.name;
         if (altStreetName && altStreetName !== streetPart) {
           ANsShown += 1;
           altStreetPart += `(${altStreetName})`;
@@ -1193,7 +1150,7 @@ function initScript() {
       a.distance > b.distance ? -1 : a.distance < b.distance ? 1 : 0
     );
     let labelsToInsert = streetPart === '' ? 1 : distances.length;
-    const requiredSpace = clutterConstant * labelText.length;
+    const requiredSpace = clutterConstant * Math.max(labelText.length, altStreetPart.length);
     // console.log(`${segmentModel.getID()} - ${labelText}: ${requiredSpace}`);
 
     // console.debug(segmentModel.getID(), distances);
@@ -1352,7 +1309,9 @@ function initScript() {
       // Skip deleted segments (this happens when the user pans away and comes back on a deleted segment)
       return { labels: [] };
     }
-    consoleDebug(`Drawing segment: ${model.id}`);
+
+    const { id, geometry, roadType: initialRoadType, isTwoWay, elevationLevel, fwdSpeedLimit, revSpeedLimit, fromLanesInfo, toLanesInfo, isAtoB, isBtoA, lockRank, flagAttributes, hasClosures, hasRestrictions, toNodeLanesCount, fromNodeLanesCount, length, primaryStreetId } = model;
+    consoleDebug(`Drawing segment: ${id}`);
     // TODO const hasToBeSk = hasToBeSkipped(attributes.roadType)
 
     //const segmentFeatures: SdkFeature<LineString>[] = [];
@@ -1365,7 +1324,7 @@ function initScript() {
     ).components;
     */
     const geometryPointArray = model.geometry.coordinates;
-    const simplified = simplify(model.geometry, { tolerance: 0.00001, highQuality: false, mutate: false });
+    const simplified = simplify(geometry, { tolerance: 0.00001, highQuality: false, mutate: false });
     /* Visualize simplified, for testing
     let redSegment: SdkFeature<LineString> = {
       type: 'Feature',
@@ -1380,49 +1339,47 @@ function initScript() {
     };
     queueSegmentFeatureForDrawing(model.id, redSegment);
     */
-    const baselevel = (model.elevationLevel ?? 0) * 100;
-    const isTwoWay = model.isTwoWay;
+    const baselevel = (elevationLevel ?? 0) * 100;
     const isInRoundabout = model.junctionId !== null;
     let isBridge = false;
     let hasSpeedLimitDrawn = false;
     // eslint-disable-next-line prefer-destructuring
-    let roadType = model.roadType;
-
+    let roadType = initialRoadType;
     //Compute the segment width
     let segmentWidth: number = 0;
     if (preferences['realsize']) {
       let segmentWidthFrom = 0;
       let segmentWidthTo = 0;
-      if (model.fromLanesInfo) {
-        if (model.fromLanesInfo.laneWidth) {
+      if (fromLanesInfo) {
+        if (fromLanesInfo.laneWidth) {
           segmentWidthFrom =
-            (model.fromLanesInfo.numberOfLanes *
-              model.fromLanesInfo.laneWidth)
+            (fromLanesInfo.numberOfLanes *
+              fromLanesInfo.laneWidth)
         } else {
           segmentWidthFrom =
-            model.fromLanesInfo.numberOfLanes *
-            defaultLaneWidthMeters[model.roadType];
+            fromLanesInfo.numberOfLanes *
+            defaultLaneWidthMeters[initialRoadType];
         }
       } else {
-        segmentWidthFrom = defaultLaneWidthMeters[model.roadType];
+        segmentWidthFrom = defaultLaneWidthMeters[initialRoadType];
       }
 
-      if (model.toLanesInfo) {
-        if (model.toLanesInfo.laneWidth) {
+      if (toLanesInfo) {
+        if (toLanesInfo.laneWidth) {
           segmentWidthTo =
-            (model.toLanesInfo.numberOfLanes *
-              model.toLanesInfo.laneWidth);
+            (toLanesInfo.numberOfLanes *
+              toLanesInfo.laneWidth);
         } else {
           segmentWidthTo =
-            model.toLanesInfo.numberOfLanes *
-            defaultLaneWidthMeters[model.roadType];
+            toLanesInfo.numberOfLanes *
+            defaultLaneWidthMeters[initialRoadType];
         }
       } else {
-        segmentWidthTo = defaultLaneWidthMeters[model.roadType];
+        segmentWidthTo = defaultLaneWidthMeters[initialRoadType];
       }
 
       if (!isTwoWay) {
-        segmentWidth = model.isAtoB
+        segmentWidth = isAtoB
           ? segmentWidthFrom
           : segmentWidthTo;
       } else if (segmentWidthTo != segmentWidthFrom) {
@@ -1440,7 +1397,7 @@ function initScript() {
     //console.log("TOTAL WIDTH: " + totalSegmentWidth);
     // roadWidth: the width of the "inner" segment, without decorations around it. It will be modified later
     let roadWidth = totalSegmentWidth;
-    if (model.primaryStreetId === null) {
+    if (primaryStreetId === null) {
       // consoleDebug("RED segment", model);
       let redSegment: SdkFeature<LineString> = {
         type: 'Feature',
@@ -1465,9 +1422,9 @@ function initScript() {
     }
 
     if (streetStyles[roadType] !== undefined) {
-      const speed = model.fwdSpeedLimit ?? model.revSpeedLimit; // If it remains null it does not have a speed limit
+      const speed = fwdSpeedLimit ?? revSpeedLimit; // If it remains null it does not have a speed limit
       // consoleDebug("Road Type: ", roadType);
-      if (model.elevationLevel && model.elevationLevel > 0) {
+      if (elevationLevel && elevationLevel > 0) {
         // it is a bridge
         // consoleDebug("Bridge");
         isBridge = true;
@@ -1500,143 +1457,93 @@ function initScript() {
 
         if (
           !preferences['showSLSinglecolor'] &&
-          (model.fwdSpeedLimit || model.revSpeedLimit) &&
-          model.fwdSpeedLimit !== model.revSpeedLimit &&
-          model.isTwoWay
+          (fwdSpeedLimit || revSpeedLimit) &&
+          fwdSpeedLimit !== revSpeedLimit &&
+          isTwoWay
         ) {
-          // consoleDebug("The segment has 2 different speed limits");
-          // It has 2 different speeds:
-          const offset = (isBridge
-            ? (totalSegmentWidth * 0.17) // 0,14
-            : (totalSegmentWidth * 0.1915)) / 0.44799999999906703; // 0,22
+          if (preferences['realsize']) {
+            // consoleDebug("The segment has 2 different speed limits");
+            // It has 2 different speeds:
+            const offset = (isBridge
+              ? (totalSegmentWidth * 0.17) // 0,14
+              : (totalSegmentWidth * 0.1915)) / 0.44799999999906703; // 0,22
 
-          // 'Left' geometry: A positive offset shifts the line to the left of its travel direction.
-          const fwdSpeedFeature = lineOffset(model.geometry, offset, { units: 'meters' });
+            // 'Left' geometry: A positive offset shifts the line to the left of its travel direction.
+            const fwdSpeedFeature = lineOffset(model.geometry, offset, { units: 'meters' });
 
-          // 'Right' geometry: A negative offset shifts the line to the right of its travel direction.
-          const revSpeedFeature = lineOffset(model.geometry, -offset, { units: 'meters' });
+            // 'Right' geometry: A negative offset shifts the line to the right of its travel direction.
+            const revSpeedFeature = lineOffset(model.geometry, -offset, { units: 'meters' });
 
 
-          let leftSpeedLimit: SdkFeature<LineString> = {
-            type: 'Feature',
-            id: model.id,
-            geometry: fwdSpeedFeature.geometry,
-            properties: {
-              'color': getColorStringFromSpeed(model.fwdSpeedLimit),
-              'width': isBridge ? totalSegmentWidth * 0.1 : totalSegmentWidth * 0.2, // 0,8
-              'dash': 'solid',
-              'closeZoomOnly': 1,
-              'zIndex': baselevel + 115,
-            },
-          };
-          queueSegmentFeatureForDrawing(model.id, leftSpeedLimit);
+            let leftSpeedLimit: SdkFeature<LineString> = {
+              type: 'Feature',
+              id: model.id,
+              geometry: fwdSpeedFeature.geometry,
+              properties: {
+                'color': getColorStringFromSpeed(fwdSpeedLimit),
+                'width': isBridge ? totalSegmentWidth * 0.1 : totalSegmentWidth * 0.2, // 0,8
+                'dash': 'solid',
+                'closeZoomOnly': 1,
+                'zIndex': baselevel + 115,
+              },
+            };
+            queueSegmentFeatureForDrawing(model.id, leftSpeedLimit);
 
-          let rightSpeedLimit: SdkFeature<LineString> = {
-            type: 'Feature',
-            id: model.id,
-            geometry: revSpeedFeature.geometry,
-            properties: {
-              'color': getColorStringFromSpeed(model.revSpeedLimit),
-              'width': isBridge ? totalSegmentWidth * 0.1 : totalSegmentWidth * 0.2, // 0,8
-              'dash': 'solid',
-              'closeZoomOnly': 1,
-              'zIndex': baselevel + 115,
-            },
-          };
-          queueSegmentFeatureForDrawing(model.id, rightSpeedLimit);
-
-          /*
-                    //let { leftGeometry, rightGeometry } = shiftLR(pointList, offset);
-                    const left: OpenLayers.Geometry.Point[] = [];
-                    const right: OpenLayers.Geometry.Point[] = [];
-                    //For each pair of points...
-                    const arrayLength = geometryPointArray.length - 1;
-                    for (let k = 0; k < arrayLength; k += 1) {
-                      const pk = geometryPointArray[k];
-                      const pk1 = geometryPointArray[k + 1];
-                      const dx = pk[0] - pk1[0];
-                      const dy = pk[1] - pk1[1];
-                      // Avoid expensive clone operations - create new points directly
-                      left[0] = [pk[0], pk[1]];
-                      right[0] = [pk[0], pk[1]];
-                      left[1] = [pk1[0], pk1[1]];
-                      right[1] = [pk1[0], pk1[1]];
-          
-                      //console.log(offset);
-                      // offset = (totalSegmentWidth / 5.0) * (30.0 / (OLMap.zoom * OLMap.zoom)); //((Wmap.zoom+1)/11)+0.6*(1/(11-Wmap.zoom));// (10-Wmap.zoom/3)/(10-Wmap.zoom);
-                      // of2 = 11 * Math.pow(2.0, 5 - W.map.zoom);
-                      // console.error(of2);
-                      // console.log(offset);
-                      if (Math.abs(dx) < 0.5) {
-                        // segment is vertical
-                        if (dy > 0) {
-                          // console.error("A");
-                          left[0].move(-offset, 0);
-                          left[1].move(-offset, 0);
-                          right[0].move(offset, 0);
-                          right[1].move(offset, 0);
-                        } else {
-                          // console.error("B");
-                          left[0].move(offset, 0);
-                          left[1].move(offset, 0);
-                          right[0].move(-offset, 0);
-                          right[1].move(-offset, 0);
-                        }
-                      } else {
-                        const m = dy / dx;
-                        const mb = -1 / m;
-                        // consoleDebug("m: ", m);
-                        if (Math.abs(m) < 0.05) {
-                          // Segment is horizontal
-                          if (dx > 0) {
-                            // console.error("C");
-                            left[0].move(0, offset);
-                            left[1].move(0, offset);
-                            right[0].move(0, -offset);
-                            right[1].move(0, -offset);
-                          } else {
-                            // console.error("D");
-                            left[0].move(0, -offset);
-                            left[1].move(0, -offset);
-                            right[0].move(0, offset);
-                            right[1].move(0, offset);
-                          }
-                        } else {
-                          let appliedOffset = offset;
-                          if ((dy > 0 && dx > 0) || (dx < 0 && dy > 0)) {
-                            // 1st and 4th q.
-                            appliedOffset = -offset;
-                          }
-                          // console.log(offset);
-                          const temp = Math.sqrt(1 + mb * mb);
-                          // console.error("E");
-                          // console.dir(left[0]);
-                          left[0].move(appliedOffset / temp, appliedOffset * (mb / temp));
-                          // console.dir(left[0]);
-                          left[1].move(appliedOffset / temp, appliedOffset * (mb / temp));
-                          right[0].move(
-                            -appliedOffset / temp,
-                            -appliedOffset * (mb / temp)
-                          );
-                          right[1].move(
-                            -appliedOffset / temp,
-                            -appliedOffset * (mb / temp)
-                          );
-                        }
-                      }
-                      // consoleDebug("Adding 2 speeds");
-                      // consoleDebug(left);
-                      // consoleDebug(right);
-                      // N.B.: even if it looks inefficient, it is correct
-                      // that this is done for each section of the segment.
-                    }*/
+            let rightSpeedLimit: SdkFeature<LineString> = {
+              type: 'Feature',
+              id: model.id,
+              geometry: revSpeedFeature.geometry,
+              properties: {
+                'color': getColorStringFromSpeed(revSpeedLimit),
+                'width': isBridge ? totalSegmentWidth * 0.1 : totalSegmentWidth * 0.2, // 0,8
+                'dash': 'solid',
+                'closeZoomOnly': 1,
+                'zIndex': baselevel + 115,
+              },
+            };
+            queueSegmentFeatureForDrawing(model.id, rightSpeedLimit);
+          } else {
+            // realsize is disabled, we cannot draw 2 separate lines.
+            let speedValue = fwdSpeedLimit; // If the segment is two way, take any speed, they are equal.
+            if (speedValue) {
+              let speedLimit: SdkFeature<LineString> = {
+                type: 'Feature',
+                id: model.id,
+                geometry: model.geometry,
+                properties: {
+                  'color': getColorStringFromSpeed(speedValue),
+                  'width': isBridge ? totalSegmentWidth * 0.8 : totalSegmentWidth,
+                  'dash': 'solid',
+                  'closeZoomOnly': 1,
+                  'zIndex': baselevel + 115,
+                },
+              };
+              queueSegmentFeatureForDrawing(model.id, speedLimit);
+            }
+            speedValue = revSpeedLimit; // If the segment is two way, take any speed, they are equal.
+            if (speedValue) {
+              let speedLimit: SdkFeature<LineString> = {
+                type: 'Feature',
+                id: model.id,
+                geometry: model.geometry,
+                properties: {
+                  'color': getColorStringFromSpeed(speedValue),
+                  'width': isBridge ? totalSegmentWidth * 0.8 : totalSegmentWidth,
+                  'dash': 'dash',
+                  'closeZoomOnly': 1,
+                  'zIndex': baselevel + 116,
+                },
+              };
+              queueSegmentFeatureForDrawing(model.id, speedLimit);
+            }
+          }
         } else {
           // The segment is two way street with the same speed limit on both sides or one way street
-          let speedValue = model.fwdSpeedLimit; // If the segment is two way, take any speed, they are equal.
+          let speedValue = fwdSpeedLimit; // If the segment is two way, take any speed, they are equal.
 
           // If it is one way and the direction is the reverse one, take the other speed
-          if (!model.isTwoWay && model.isBtoA) {
-            speedValue = model.revSpeedLimit;
+          if (!isTwoWay && isBtoA) {
+            speedValue = revSpeedLimit;
           }
           if (speedValue) {
             let speedLimit: SdkFeature<LineString> = {
@@ -1670,7 +1577,7 @@ function initScript() {
       };
       queueSegmentFeatureForDrawing(model.id, roadFeature);
 
-      if (model.elevationLevel && model.elevationLevel < 0) {
+      if (elevationLevel && elevationLevel < 0) {
         // Tunnel
         let tunnel: SdkFeature<LineString> = {
           type: 'Feature',
@@ -1686,7 +1593,7 @@ function initScript() {
         queueSegmentFeatureForDrawing(model.id, tunnel);
       }
 
-      const currentLock = model.lockRank + 1;
+      const currentLock = lockRank + 1;
       const userRank = wmeSDK.State.getUserInfo()?.rank;
       if (
         currentLock > preferences['fakelock'] ||
@@ -1706,7 +1613,7 @@ function initScript() {
         queueSegmentFeatureForDrawing(model.id, fakelock);
       }
 
-      const flags = model.flagAttributes;
+      const flags = flagAttributes;
 
       if (flags.unpaved) {
 
@@ -1728,7 +1635,7 @@ function initScript() {
       // Check segment properties
 
       // CLOSE Zoom properties
-      if (model.hasClosures) {
+      if (hasClosures) {
         let closureLine: SdkFeature<LineString> = {
           type: 'Feature',
           id: model.id,
@@ -1786,7 +1693,7 @@ function initScript() {
         queueSegmentFeatureForDrawing(model.id, roundaboutLine);
       }
 
-      if (model.hasRestrictions) {
+      if (hasRestrictions) {
         // It has restrictions
         // consoleDebug("Segment has restrictions");
         let restrictionLine: SdkFeature<LineString> = {
@@ -1857,7 +1764,7 @@ function initScript() {
         queueSegmentFeatureForDrawing(model.id, nearbyHOVLine);
       }
 
-      if (model.toNodeLanesCount > 0) {
+      if (toNodeLanesCount > 0) {
         // console.log("LANE fwd");
         const res = geometryPointArray.slice(0, 2);
         res[1] = getCentroid(res);
@@ -1877,7 +1784,7 @@ function initScript() {
         };
         queueSegmentFeatureForDrawing(model.id, letToNodeLanes);
       }
-      if (model.fromNodeLanesCount > 0) {
+      if (fromNodeLanesCount > 0) {
         // was: revLaneCount
         // console.log("LANE rev");
         // Deep copy the last two points to avoid mutating the original array
@@ -1901,19 +1808,19 @@ function initScript() {
       }
 
       if (
-        !model.isTwoWay
+        !isTwoWay
       ) {
         // consoleDebug("The segment is oneway or has unknown direction");
         let simplifiedPoints = model.geometry.coordinates;
         // N.B. model.length is the length in meters, not the items in the array (it's an object)
         if (
           !isInRoundabout &&
-          (model.length / simplifiedPoints.length) < preferences['arrowDeclutter']
+          (length / simplifiedPoints.length) < preferences['arrowDeclutter']
         ) {
           simplifiedPoints = simplified.coordinates;
         }
 
-        if ((model.isAtoB || model.isBtoA/* || model.isTwoWay was already checked in the first if*/) === false) {
+        if ((isAtoB || isBtoA/* || isTwoWay was already checked in the first if*/) === false && wmeSDK.DataModel.Segments.isRoadTypeDrivable({ roadType: model.roadType })) {
           // Unknown direction
           for (let p = 0; p < simplifiedPoints.length - 1; p += 1) {
             // let shape = OpenLayers.Geometry.Polygon.createRegularPolygon(new OpenLayers.Geometry.LineString([simplifiedPoints[p],simplifiedPoints[p+1]]).getCentroid(true), 2, 6, 0); // origin, size, edges, rotation
@@ -1921,7 +1828,10 @@ function initScript() {
             let unknownDir: SdkFeature<Point> = {
               type: 'Feature',
               id: model.id,
-              geometry: { type: 'Point', coordinates: getCentroid(simplified.coordinates.slice(p, p + 2)) },
+              geometry: {
+                type: 'Point',
+                coordinates: (p + 2) < simplifiedPoints.length ? getCentroid(simplifiedPoints.slice(p, p + 2)) : getCentroid([simplifiedPoints[p], simplifiedPoints[p + 1]])
+              },
               properties: {
                 'closeZoomOnly': 1,
                 'isUnknownDirection': 1,
@@ -1936,7 +1846,7 @@ function initScript() {
           const step = isInRoundabout ? 3 : 1;
           for (let p = step - 1; p < simplifiedPoints.length - 1; p += step) {
             const degrees = getAngleDegreesSDK(
-              model.isAtoB,
+              isAtoB,
               simplifiedPoints[p],
               simplifiedPoints[p + 1]
             );
@@ -1944,9 +1854,12 @@ function initScript() {
             let arrow: SdkFeature<Point> = {
               type: 'Feature',
               id: model.id,
-              geometry: { type: 'Point', coordinates: getCentroid(simplifiedPoints.slice(p, p + 2)) },
+              geometry: {
+                type: 'Point',
+                coordinates: (p + 2) < simplifiedPoints.length ? getCentroid(simplifiedPoints.slice(p, p + 2)) : getCentroid([simplifiedPoints[p], simplifiedPoints[p + 1]])
+
+              },
               properties: {
-                'isArrow': 1,
                 'degrees': degrees,
                 'zIndex': baselevel + 180
               },
@@ -1956,22 +1869,22 @@ function initScript() {
         }
       }
 
-      if (flags.fwdSpeedCamera && (model.isAtoB || model.isTwoWay)) {
+      if (flags.fwdSpeedCamera && (isAtoB || isTwoWay)) {
         const avg = createAverageSpeedCameraSDK({
           id: model.id,
           rev: false,
-          isForward: model.isAtoB || model.isTwoWay,
+          isForward: isAtoB || isTwoWay,
           p0: model.geometry.coordinates[0],
           p1: model.geometry.coordinates[1],
         });
         queueIconFeatureForDrawing(model.id, avg);
       }
 
-      if (flags.revSpeedCamera && (model.isBtoA || model.isTwoWay)) {
+      if (flags.revSpeedCamera && (isBtoA || isTwoWay)) {
         const avg = createAverageSpeedCameraSDK({
           id: model.id,
           rev: true,
-          isForward: model.isAtoB,
+          isForward: isAtoB,
           p0: model.geometry.coordinates[model.geometry.coordinates.length - 1],
           p1: model.geometry.coordinates[model.geometry.coordinates.length - 2],
         });
@@ -2014,7 +1927,7 @@ function initScript() {
     const oldModel = W.model.segments.getObjectById(model.id);
     let labels;
     if (oldModel) {
-      labels = drawLabels(oldModel, oldModel?.getOLGeometry().simplify(1.5).components);
+      labels = drawLabels(oldModel, oldModel?.getOLGeometry().simplify(7).components);
     }
     return { labels };
   }
@@ -2796,7 +2709,7 @@ function initScript() {
     });
 
     // Toggle metric/decimal
-    const WMEUsesImperial = W.prefs.attributes['isImperial'];
+    const WMEUsesImperial = wmeSDK.Settings.getUserSettings().isImperial;
     const type = WMEUsesImperial ? 'imperial' : 'metric';
     const speeds = Object.keys(preferences['speeds'][type]);
     const slLinesToHide = document.querySelectorAll(
@@ -3476,9 +3389,9 @@ function initScript() {
     );
 
     /*
-        for (let k = W.prefs.attributes['isImperial'] ? 9 : 15; k > 1; k -= 1) {
+        for (let k = wmeSDK.Settings.getUserSettings().isImperial ? 9 : 15; k > 1; k -= 1) {
             const span = document.createElement("span");
-            if (W.prefs.attributes['isImperial']) {
+            if (wmeSDK.Settings.getUserSettings().isImperial) {
                 span.style['color'] = getColorStringFromSpeed((k * 10 - 5) * 1.609344);
                 span.innerText = k * 10 - 5;
             } else {
@@ -4218,12 +4131,10 @@ function initScript() {
       'Street Vector Layer',
       SVL_VERSION,
       `<b>${_('whats_new')}</b>
+      <br>- 6.2.5 - Fix a rare bug with labels, more labels will get shown (maybe slightly outside of the segment). It is now possible for other script to know if SVL was initialized.
       <br>- 6.2.4 - Fix for road width computation and performance improvements.
       <br>- 6.2.3 - New: you can now customize how nodes look like (size and color). Please note: virtual nodes are not available yet. Deprecated: "show geometry nodes" and "hide minor roads" options. Bug fixes (road layer not getting hidden, fallback translations not getting used).
-      <br>- 6.2.0 - Major update: the segments layer is now drawn using the SDK. Various bug fixes (average speed cameras, nodes not disappearing).
-      <br>- 6.1.0 - The nodes layer is now a WME SDK layer, instead of an OpenLayers layer. This should improve performance and stability.
-      <br>- 6.0.0 - Start using the new WME SDK. <b>SVL is likely to be discontinued if Waze quits supporting OpenLayers without a viable alternative.</b>
-      <br>- 6.0.0 - Fix: no more road layer automatically enabled by the WME, when SVL is on.`,
+      <br>- 6.2.0 - Major update: the segments layer is now drawn using the SDK. Various bug fixes (average speed cameras, nodes not disappearing).`,
       '',
       GM_info.script.supportURL
     );
@@ -4943,6 +4854,10 @@ function initScript() {
           const props = context.feature?.properties || {};
           return props['zIndex'] || 1;
         },
+        'display': (context) => {
+          const props = context.feature?.properties || {};
+          return props['closeZoomOnly'] === 1 && isFarZoom(context.zoomLevel as ZoomLevel) ? 'none' : undefined;
+        },
       },
       styleRules: [
         {
@@ -5141,6 +5056,8 @@ function initScript() {
       enableSVLLayers();
     }
 
+    document.svlInitialized = true;
+    document.dispatchEvent(new CustomEvent('svl-initialized'));
 
     //mergeEndCallback();
     console.log(`[SVL] v. ${SVL_VERSION} initialized correctly.`);
@@ -5407,6 +5324,7 @@ Please paste it in a file (CTRL+V) to store it.`;
   fallback[`virtual_node_color_descr`] = `These are nodes that connect non-drivable segments with roads, without splitting them.`;
   fallback[`node_size`] = `Nodes size`;
   fallback[`node_size_descr`] = `Increase this value if nodes are too small.`;
+  fallback[`pick_a_color`] = `Pick a color`;
 
   initSVL();
 }

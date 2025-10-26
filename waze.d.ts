@@ -748,6 +748,10 @@ interface Window {
   // 'navigator.scheduling' is handled by augmenting Navigator above
 }
 
+interface Document {
+  svlInitialized: boolean | undefined;
+}
+
 declare global {
   /** @deprecated use wmeSDK */
   var W: IW;
