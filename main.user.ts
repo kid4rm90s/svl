@@ -145,6 +145,7 @@ function initScript() {
   let labelsVector: OpenLayers.Layer.Vector;
   /** @type {boolean} */
   let drawingAborted: boolean = false;
+  let mergeEndCallbackAfterDrawingAborted: Function | null = null;
 
   let preferences: PreferenceObject;
   /** @type {OpenLayers.Layer.Vector} */
@@ -231,10 +232,10 @@ function initScript() {
 
   let mergeEndDefer: number;
   function mergeEndCallback() {
-    consoleDebug('[EVENTS] mergeEndCallback (deferred)');
+    console.log('[EVENTS] mergeEndCallback (deferred)');
     if (countryID) {
       clearTimeout(mergeEndDefer);
-      mergeEndDefer = setTimeout(mergeEndFired, 5000);
+      mergeEndDefer = setTimeout(mergeEndFired, 3000);
     } else { // fire  ASAP
       mergeEndFired();
     }
@@ -3657,7 +3658,7 @@ function initScript() {
     return true;
   }
 
-  function enableSVLLayers() {
+  function enableSVLLayers(): boolean {
     if (!SVLAutomDisabled && !svl_layer_is_visible) {
       consoleDebug('layer enabled: registering events');
       svl_layer_is_visible = true;
@@ -3673,12 +3674,14 @@ function initScript() {
 
       registerSegmentsEvents();
       registerNodeEvents();
-      const res = updateStatusBasedOnZoom();
-      if (res === true) {
+      const shouldRedraw = updateStatusBasedOnZoom();
+      if (shouldRedraw === true) {
         redrawAllSegments();
       }
       wmeSDK.LayerSwitcher.setLayerCheckboxChecked({ name: LAYERS.SEGMENTS, isChecked: true });
+      return true;
     }
+    return false;
   }
 
   function disableSVLLayers() {
@@ -3697,26 +3700,46 @@ function initScript() {
     }
   }
 
-  function updateStatusBasedOnZoom(): boolean {
-    consoleDebug('updateStatusBasedOnZoom running');
-    let mustRefresh = true;
-    if (drawingAborted) {
+  let handleDrawingAbortedDefer: number | null = null;
+
+  function handleDrawingAbortedProcessShouldContinue(): void {
+    if (!drawingAborted) return;
+
+    // Clear any existing timeout to reset the 1 second window
+    if (handleDrawingAbortedDefer !== null) {
+      clearTimeout(handleDrawingAbortedDefer);
+    }
+
+    // Defer the actual processing by 1 second
+    handleDrawingAbortedDefer = setTimeout(() => {
+      consoleDebug(`Segments: ${wmeSDK.DataModel.Segments.getAll().length}, Nodes: ${wmeSDK.DataModel.Nodes.getAll().length}`);
+      consoleDebug(`Limits: Segments: ${preferences['segmentsThreshold']}, Nodes: ${preferences['nodesThreshold']}`);
       if (
         wmeSDK.DataModel.Segments.getAll().length < preferences['segmentsThreshold'] &&
         wmeSDK.DataModel.Nodes.getAll().length < preferences['nodesThreshold']
       ) {
+        // set everything in a state that allows proceeding
+        let successful = enableSVLLayers();
+        if (!successful) return;
+        if (mergeEndCallbackAfterDrawingAborted) {
+          mergeEndCallbackAfterDrawingAborted();
+          mergeEndCallbackAfterDrawingAborted = null;
+        }
         drawingAborted = false;
-        enableSVLLayers();
         setLayerVisibility(ROAD_LAYER, false);
         redrawAllSegments();
       } else {
         console.warn(
-          `[SVL] Still too many elements to draw: Segments: ${wmeSDK.DataModel.Segments.getAll().length}/${preferences['segmentsThreshold']}, Nodes: ${wmeSDK.DataModel.Nodes.getAll().length})
-          }/${preferences['nodesThreshold']
-          } - You can change these thresholds in the preference panel.`
+          `[SVL] Still too many elements to draw: Segments: ${wmeSDK.DataModel.Segments.getAll().length}/${preferences['segmentsThreshold']}, Nodes: ${wmeSDK.DataModel.Nodes.getAll().length}/${preferences['nodesThreshold']} - You can change these thresholds in the preference panel.`
         );
       }
-    }
+      handleDrawingAbortedDefer = null;
+    }, 1000);
+  }
+
+  function updateStatusBasedOnZoom(): boolean {
+    consoleDebug('updateStatusBasedOnZoom running');
+    let mustRefresh = true;
     if (wmeSDK.Map.getZoomLevel() <= +preferences['useWMERoadLayerAtZoom']) {
       // There is nothing to draw, enable road layer
       consoleDebug('Road layer automatically enabled because of zoom out');
@@ -3867,6 +3890,11 @@ function initScript() {
   function abortDrawing() {
     console.trace();
     console.warn('[SVL] Abort drawing, too many elements');
+
+    mergeEndCallbackAfterDrawingAborted = wmeSDK.Events.on({
+      eventName: "wme-map-data-loaded",
+      eventHandler: () => { handleDrawingAbortedProcessShouldContinue() },
+    });
     drawingAborted = true;
     setLayerVisibility(ROAD_LAYER, true);
     disableSVLLayers();
