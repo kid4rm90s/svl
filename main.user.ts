@@ -249,6 +249,15 @@ function initScript() {
       consoleDebug('Init new country ' + countryID);
       initCountry(tc);
     }
+    
+    // Reapply GPS layer positioning after data refresh with a short delay
+    // to ensure GPS layer is properly loaded
+    if (preferences['showUnderGPSPoints'] !== undefined) {
+      consoleDebug('[GPS] Scheduling GPS layer positioning reapplication after data refresh');
+      setTimeout(() => {
+        updateLayerPosition();
+      }, 500);
+    }
   }
 
   function initCountry(topCountry: Country) {
@@ -1982,10 +1991,20 @@ function initScript() {
       gpsLayerIndex = wmeSDK.Map.getLayerZIndex({ layerName: 'gps_points' });
     } catch (error) {
       console.error('[SVL] Error getting GPS Layer index:', error);
+      // Retry a few times in case the GPS layer isn't loaded yet
+      if (trial < 5) {
+        consoleDebug(`[GPS] Retrying GPS layer positioning, attempt ${trial + 1}/5`);
+        setTimeout(() => {
+          updateLayerPosition(trial + 1);
+        }, 1000);
+      }
       return;
     }
-    consoleDebug(`GPS Layer index: ${gpsLayerIndex}`);
+    
+    consoleDebug(`[GPS] GPS Layer index: ${gpsLayerIndex}, showUnderGPSPoints: ${preferences['showUnderGPSPoints']}`);
+    
     if (preferences['showUnderGPSPoints']) {
+      // Place SVL layers below GPS points
       wmeSDK.Map.setLayerZIndex({
         layerName: LAYERS.SEGMENTS,
         zIndex: gpsLayerIndex - 20
@@ -2004,6 +2023,7 @@ function initScript() {
         zIndex: gpsLayerIndex - 13
       });
     } else {
+      // Place SVL layers above GPS points
       wmeSDK.Map.setLayerZIndex({
         layerName: LAYERS.SEGMENTS,
         zIndex: gpsLayerIndex + 15
