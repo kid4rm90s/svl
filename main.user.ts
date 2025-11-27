@@ -4137,7 +4137,7 @@ function initScript() {
   function initWazeWrapElements() {
     console.log('SVL: initializing WazeWrap');
     // Adding keyboard shortcut
-    const defaultShortcut = "l";
+    const defaultShortcut = "Shift+f";
 
     const toggleShortcut: KeyboardShortcut = {
       callback: keyboardShortcutCallback,
@@ -5178,7 +5178,7 @@ function initScript() {
   fallback[`some_info`] = `Some info about it:`;
   fallback[
     `default_shortcut_instruction`
-  ] = `By default, use ALT+L to toggle the layer.`;
+  ] = `By default, use Shift+f to toggle the layer.`;
   fallback[
     `instructions_1`
   ] = `You can change the streets color, thickness and style using the panel on the left sidebar.`;
